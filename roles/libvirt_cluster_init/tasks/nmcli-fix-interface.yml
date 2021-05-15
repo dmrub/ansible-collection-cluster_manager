@@ -1,0 +1,31 @@
+---
+# nmcli exit codes: https://developer.gnome.org/NetworkManager/stable/nmcli.html
+
+- name: Debug | Print interfaces where the default routes will be disabled
+  debug:
+    var: item
+  loop: "{{ nmcli_dev_list }}"
+  when: item.device != fix_interface.device and item.type != 'loopback'
+
+- name: nmcli | Disable default routes
+  become: yes
+  command: >-
+    {{ nmcli_path }} con modify {{ item.connection | quote }} ipv4.never-default yes
+  loop: "{{ nmcli_dev_list }}"
+  when: item.device != fix_interface.device and item.type != 'loopback'
+
+- name: Debug | Print active connections that will restart
+  debug:
+    var: item
+  loop: "{{ nmcli_active_conn_list }}"
+  when: item.device != fix_interface.device
+
+- name: nmcli | Restart active connections
+  become: yes
+  shell: >-
+    {{ nmcli_path }} con down {{ item.name | quote }} &&
+    {{ nmcli_path }} con up {{ item.name | quote }}
+  register: nmcli_result
+  failed_when: nmcli_result.rc != 0 and nmcli_result.rc != 4
+  loop: "{{ nmcli_active_conn_list }}"
+  when: item.device != fix_interface.device

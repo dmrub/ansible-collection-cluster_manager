@@ -1,0 +1,175 @@
+{% set envoptions = dict(variable_start_string='[%', variable_end_string='%]') %}
+{% macro opt_attr(name, value) -%} {# Optional attribute macro #}
+{% if value is defined -%}
+{{ name }}: {{ value | to_json}}
+{%- endif %}
+{%- endmacro %}
+{% macro mand_attr(name, value) -%} {# Mandatory attribute macro #}
+{{ name }}: {{ value | to_json}}
+{%- endmacro %}
+
+libvirt_host: {{ inventory_hostname }}
+libvirt_cluster_inventory_group: {{ libvirt_cluster_inventory_group | default('') }}
+libvirt_vms:
+{% set ns = namespace(global_index0=0, network=dict()) %}
+{% for cluster_node in libvirt_cluster.nodes %}
+
+{% for index0 in range(cluster_node.count | default(1)) %}
+  {% set node_name = cluster_node.name | default("[% 'node-%02d' | format(index+1) %]") | render(index=index0, global_index=ns.global_index0, envoptions=envoptions) %}
+  {% set node_vars = cluster_node.vars | default({}) %}
+
+  - state: present
+    {{ mand_attr('name', node_name) }}
+    {{ opt_attr( 'memory_mb', cluster_node.memory_mb) }}
+    {{ opt_attr( 'vcpus', cluster_node.vcpus) }}
+    {{ opt_attr( 'cpu_mode', cluster_node.cpu_mode ) }}
+    {{ opt_attr( 'graphics', cluster_node.graphics ) }}
+    volumes:
+      {% for volume in cluster_node.volumes -%}
+
+      - {{ mand_attr('name', volume.name |
+                     default("[% 'node-%02d-vol-%02d' | format(index+1, volume_index+1) %]") |
+                     render(index=index0, global_index=ns.global_index0, volume_index=loop.index0, envoptions=envoptions)) }}
+        {{ opt_attr( 'device', volume.device) }}
+        {{ opt_attr( 'type', volume.type) }}
+        {{ opt_attr( 'format', volume.format) }}
+        {{ opt_attr( 'capacity', volume.capacity) }}
+        {{ opt_attr( 'clone', volume.clone) }}
+        {{ opt_attr( 'backing_image', volume.backing_image) }}
+        {{ opt_attr( 'pool', volume.pool) }}
+        {{ opt_attr( 'file_path', volume.file_path) }}
+        {{ opt_attr( 'dev', volume.dev) }}
+        {{ opt_attr( 'prevent_destroy', volume.prevent_destroy) }}
+
+      {% endfor %}
+
+    interfaces:
+      {% for iface in cluster_node.interfaces -%}
+      {%   if iface.enabled | default(true) %}
+      {%     set iface_info = {} %}
+      {%     if iface.type is defined and iface.type == 'direct' %}
+      {%       set iface_type = 'direct' %}
+      {%     elif (iface.type is defined and iface.type == 'bridge') or (iface.bridge is defined) %}
+      {%       set iface_type = 'bridge' %}
+      {%     else %}
+      {%       set iface_type = 'network' %}
+      {%     endif %}
+      {%     if iface.mac is defined %}
+      {%       set iface_mac = iface.mac | render(index=index0, global_index=ns.global_index0, envoptions=envoptions) %}
+      {%       set iface_info = iface_info | combine({'mac': iface_mac}) %}
+      {%     endif %}
+      {%     if iface.ip is defined %}
+      {%       set iface_ip = iface.ip | render(index=index0, global_index=ns.global_index0, envoptions=envoptions) %}
+      {%       set iface_info = iface_info | combine({'ip': iface_ip}) %}
+      {%     endif %}
+      {%     if iface.name is defined %}
+      {%       set iface_name = iface.name | render(index=index0, global_index=ns.global_index0, envoptions=envoptions) %}
+      {%       set iface_info = iface_info | combine({'name': iface_name, 'vars': node_vars}) %}
+      {%     else  %}
+      {%       set iface_info = iface_info | combine({'name': node_name, 'vars': node_vars}) %}
+      {%     endif %}
+      {%     if iface.label is defined %}
+      {%       set label_list = [iface.label] if iface.label is string else iface.label %}
+      {%       set result = namespace(list=[]) %}
+      {%       for label in label_list %}
+      {%         set result.list = result.list + [(label | render(index=index0, global_index=ns.global_index0, envoptions=envoptions))] %}
+      {%       endfor %}
+      {%       set iface_label = result.list %}
+      {%       set iface_info = iface_info | combine({'label': iface_label}) %}
+      {%     endif  %}
+
+      {%     if iface.guest_config is defined %}
+      {%       set guest_config = {} %}
+      {%       if iface.guest_config.ip4 is defined %}
+      {%         set guest_ip4_list = [iface.guest_config.ip4] if iface.guest_config.ip4 is string else iface.guest_config.ip4 %}
+      {%         set result = namespace(list=[]) %}
+      {%         for guest_ip4 in guest_ip4_list %}
+      {%           set result.list = result.list + [(guest_ip4 | render(index=index0, global_index=ns.global_index0, envoptions=envoptions))] %}
+      {%         endfor %}
+      {%         set guest_ip4_list = result.list %}
+      {%         set guest_config = guest_config | combine({'ip4': guest_ip4_list}) %}
+      {%       endif  %}
+      {%       if iface.guest_config.dns4 is defined %}
+      {%         set guest_dns4_list = [iface.guest_config.dns4] if iface.guest_config.dns4 is string else iface.guest_config.dns4 %}
+      {%         set result = namespace(list=[]) %}
+      {%         for guest_dns4 in guest_dns4_list %}
+      {%           set result.list = result.list + [(guest_dns4 | render(index=index0, global_index=ns.global_index0, envoptions=envoptions))] %}
+      {%         endfor %}
+      {%         set guest_dns4_list = result.list %}
+      {%         set guest_config = guest_config | combine({'dns4': guest_dns4_list}) %}
+      {%       endif  %}
+      {%       if iface.guest_config.gateway4 is defined %}
+      {%         set guest_gateway4 = iface.guest_config.gateway4 | render(index=index0, global_index=ns.global_index0, envoptions=envoptions) %}
+      {%         set guest_config = guest_config | combine({'gateway4': guest_gateway4}) %}
+      {%       endif  %}
+      {%       if iface.guest_config.dhcp4 is defined %}
+      {%         set guest_dhcp4 = (iface.guest_config.dhcp4 | render(index=index0, global_index=ns.global_index0, envoptions=envoptions) | bool)
+                                    if iface.guest_config.dhcp4 is string else iface.guest_config.dhcp4
+      %}
+      {%         set guest_config = guest_config | combine({'dhcp4': guest_dhcp4}) %}
+      {%       endif  %}
+      {%       if iface.guest_config.route_metric4 is defined %}
+      {%         set guest_route_metric4 = (iface.guest_config.route_metric4 | render(index=index0, global_index=ns.global_index0, envoptions=envoptions) | int)
+                                    if iface.guest_config.route_metric4 is string else iface.guest_config.route_metric4
+      %}
+      {%         set guest_config = guest_config | combine({'route_metric4': guest_route_metric4}) %}
+      {%       endif  %}
+
+      {%       if iface.guest_config.routes4 is defined %}
+      {%         set guest_routes4_list = (iface.guest_config.routes4
+                 if iface.guest_config.routes4 is sequence and iface.guest_config.routes4 is not string and iface.guest_config.routes4 is not mapping) |
+                 mandatory('routes4 field must be a list, but is of type ' ~ (iface.guest_config.routes4 | type_debug))
+      %}
+      {%         set result = namespace(list=[]) %}
+      {%         for guest_route4 in guest_routes4_list %}
+      {%           set route_to = guest_route4.to | mandatory('to address field missing in routes4 item') %}
+      {%           set route_via = guest_route4.via | mandatory('via address field missing in routes4 item') %}
+      {%           set route_metric = guest_route4.metric | default(none) %}
+      {%           set result.list = result.list + [
+                        {
+                          'to': route_to | string | render(index=index0, global_index=ns.global_index0, envoptions=envoptions),
+                          'via': route_via | string | render(index=index0, global_index=ns.global_index0, envoptions=envoptions)
+                        } | combine(
+                          {
+                            'metric': (route_metric | render(index=index0, global_index=ns.global_index0, envoptions=envoptions) | int)
+                                      if route_metric is string else route_metric
+                          }
+                          if route_metric is not none else
+                          {}
+                        )
+                   ]
+      %}
+      {%         endfor %}
+      {%         set guest_routes4_list = result.list %}
+      {%         set guest_config = guest_config | combine({'routes4': guest_routes4_list}) %}
+      {%       endif  %}
+      {%       set iface_info = iface_info | combine({'guest_config': guest_config}) %}
+      {%     endif %}
+
+      - {{ mand_attr('type', iface_type) }}
+        {{ opt_attr('source', iface.source) }}
+        {{ opt_attr('network', iface.network) }}
+        {{ opt_attr('bridge', iface.bridge) }}
+        {{ opt_attr('mac', iface_mac ) }}
+        {{ opt_attr('label', iface_label ) }}
+        {{ opt_attr('guest_config', guest_config) }}
+      {%     if iface.network is defined %}
+      {%       set _ = ns.network.update({iface.network : (ns.network[iface.network] | default([])) + [iface_info]}) %}
+      {%     endif %}
+      {%   endif %}
+      {% endfor %}
+{% set ns.global_index0 = ns.global_index0 + 1 %}
+{% endfor %}
+{% endfor %}
+
+libvirt_host_networks:
+{% set ns.global_index0 = 0 %}
+{% for cluster_network in libvirt_cluster.networks %}
+  {% if cluster_network.name is defined and cluster_network.name in ns.network %}
+  {% set hosts = ns.network[cluster_network.name] %}
+  {% set cluster_network = cluster_network | combine({'ip': {'dhcp': {'hosts': cluster_network.ip.dhcp.hosts | default([]) + hosts}}}, recursive=True) %}
+  {% endif %}
+
+  - {{ cluster_network | to_json }}
+{% set ns.global_index0 = ns.global_index0 + 1 %}
+{% endfor %}

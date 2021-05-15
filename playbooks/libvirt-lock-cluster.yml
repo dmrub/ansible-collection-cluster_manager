@@ -1,0 +1,107 @@
+---
+- name: Determine Cluster to Lock by Host
+  hosts: 127.0.0.1
+  connection: local
+  gather_facts: false
+  vars_prompt:
+    - name: libvirt_cluster_host
+      prompt: "Libvirt cluster host or group to lock (libvirt_cluster_host)"
+      private: no
+  tasks:
+
+    - name: If libvirt_cluster_host is a group name get first node of this group
+      set_fact:
+          _libvirt_cluster_host: >-
+            {{ groups[libvirt_cluster_host][0] if (hostvars[libvirt_cluster_host] is not defined and
+                groups[libvirt_cluster_host] is defined and
+                (groups[libvirt_cluster_host] | length) > 0) else libvirt_cluster_host
+            }}
+
+    - name: Debug | Print libvirt_cluster_host
+      debug:
+        var: _libvirt_cluster_host
+
+    - name: Check if the host _libvirt_cluster_host is defined
+      fail:
+        msg: "There is no host or group named {{_libvirt_cluster_host}}"
+      when: hostvars[_libvirt_cluster_host] is not defined
+
+    - name: Check libvirt_config variable
+      fail:
+        msg: "No libvirt_config variable is defined in variables of the {{_libvirt_cluster_host}} host"
+      when: hostvars[_libvirt_cluster_host].libvirt_config is not defined
+
+    - name: Set libvirt_config variable
+      set_fact:
+        libvirt_config: "{{ hostvars[_libvirt_cluster_host].libvirt_config }}"
+        libvirt_host: "{{ hostvars[_libvirt_cluster_host].libvirt_config.libvirt_host }}"
+
+- name: Lock Cluster
+  hosts: "{{ hostvars['127.0.0.1']['libvirt_host'] }}"
+  vars:
+    unlock_cluster: false # unlock instead of locking
+
+    libvirt_vm_uri: "qemu:///system"
+    # Variables to add to the enviroment that is used to execute virsh commands
+    libvirt_vm_script_env: "{{  { 'LIBVIRT_DEFAULT_URI': libvirt_vm_uri } if libvirt_vm_uri else {} }}"
+
+    libvirt_config: "{{ hostvars['127.0.0.1']['libvirt_config'] }}"
+    libvirt_cluster_host: "{{ hostvars['127.0.0.1']['_libvirt_cluster_host'] }}"
+    libvirt_host: "{{ hostvars['127.0.0.1']['libvirt_host'] }}"
+  tasks:
+
+    - name: Set variables
+      set_fact:
+        _unlock_cluster: "{{ unlock_cluster | default(false) | bool }}"
+
+    - name: Print action
+      debug:
+        msg: "{%if _unlock_cluster %}Unlocking{% else %}Locking{% endif %} cluster"
+
+    - name: Lock or unlock domain by setting metadata
+      environment: "{{ libvirt_vm_script_env }}"
+      command: >-
+        virsh metadata {{ item | quote }} {{ metadata_uri | quote }} --config
+        {% if _unlock_cluster %}
+         --remove
+        {% else %}
+         --key {{ key | quote }} --set {{ value | quote }}
+        {% endif %}
+      vars:
+        metadata_uri: "http://example.org/xmlns/libvirt/1.0/lock"
+        key: "lock"
+        value: "<lock value='true'/>"
+      loop: "{{ libvirt_config.libvirt_vms | map(attribute='name') | list }}"
+
+    - name: Get metadata
+      environment: "{{ libvirt_vm_script_env }}"
+      command: >-
+        virsh metadata {{ item | quote }} {{ metadata_uri | quote }} --config
+      failed_when: "metadata_r.rc != 0 and 'metadata not found' not in metadata_r.stderr"
+      vars:
+        metadata_uri: "http://example.org/xmlns/libvirt/1.0/lock"
+      loop: "{{ libvirt_config.libvirt_vms | map(attribute='name') | list }}"
+      register: metadata_r
+
+    - name: Read an metadata's attribute values
+      xml:
+        xmlstring: "{{ item.stdout }}"
+        xpath: /lock
+        content: attribute
+      register: xml_r
+      when: "item.rc == 0 and (item.stdout | trim | length > 0)"
+      loop: "{{ metadata_r.results }}"
+
+    - name: Fail if the domain was not locked
+      fail:
+        msg: >-
+          {%if _unlock_cluster %}
+          The lock should be set, but was not set for domain
+          {% else %}
+          The lock should be removed, but is present for the domain
+          {% endif %} {{ item.item.item }}
+      when: >-
+        (not _unlock_cluster and not domain_locked) or (_unlock_cluster and domain_locked)
+      vars:
+        domain_locked: "{{ item.matches[0].lock.value | default(false) | bool }}"
+      loop: "{{ xml_r.results }}"

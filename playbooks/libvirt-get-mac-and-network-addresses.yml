@@ -1,0 +1,139 @@
+---
+- name: Get MAC and Network addresses used by libvirt
+  hosts: "{{ libvirt_host | default('libvirt') }}"
+
+  vars:
+    dest_dir: "."
+    mac_dest_file: mac-addresses.txt
+    network_dest_file: network-addresses.txt
+
+    libvirt_vm_uri: "qemu:///system"
+
+    # Variables to add to the enviroment that is used to execute virsh commands
+    libvirt_vm_script_env: "{{  { 'LIBVIRT_DEFAULT_URI': libvirt_vm_uri } if libvirt_vm_uri else {} }}"
+
+  tasks:
+
+    - name: List domains
+      environment: "{{ libvirt_vm_script_env }}"
+      command: >
+        virsh list
+        --all
+        --name
+      changed_when: false
+      register: domains_r
+
+    - name: Dump domain xml
+      environment: "{{ libvirt_vm_script_env }}"
+      command: >
+        virsh dumpxml {{ item | quote }}
+      changed_when: false
+      loop: "{{ domains_r.stdout_lines }}"
+      register: domains_xml_r
+
+    - name: List networks
+      environment: "{{ libvirt_vm_script_env }}"
+      command: >
+        virsh net-list
+        --all
+        --name
+      changed_when: false
+      register: nets_r
+
+    - name: Dump network xml
+      environment: "{{ libvirt_vm_script_env }}"
+      command: >
+        virsh net-dumpxml {{ item | quote }}
+      changed_when: false
+      loop: "{{ nets_r.stdout_lines }}"
+      register: nets_xml_r
+
+    - name: Extract and collect MAC addresses
+      set_fact:
+        mac_addresses: |-
+          {{ (mac_addresses | default([])) | union(macs_from_item) }}
+        network_addresses: |-
+          {{ (network_addresses | default([])) | union(network_ips_from_item) }}
+      vars:
+        macs_from_item: "{{ item.stdout | regex_findall(get_macs_re) | map('regex_replace', extract_mac_re, '\\g<address>') | list }}"
+        get_macs_re: <mac[^>]+>
+        extract_mac_re: <mac(?:\s+address=['"](?P<address>[^'"]+)['"]|\s+[^>\s]+)*[^>]*>
+        network_ips_from_item: "{{ item.stdout | regex_findall(get_network_ip_re) | map('regex_replace', extract_network_ip_re, '\\g<address>/\\g<netmask>') | ipaddr | list }}"
+        get_network_ip_re: <ip[^>]+>
+        extract_network_ip_re: <ip(?:\s+address=['"](?P<address>[0-9.]+)['"]|\s+netmask=['"](?P<netmask>[0-9.]+)['"]|\s+[^>\s]+)*[^>]*>
+      loop: "{{ domains_xml_r.results + nets_xml_r.results }}"
+
+    - name: Collected MAC addresses
+      debug:
+        msg: "{{ [{'Host name': inventory_hostname}, {'Mac addresses': mac_addresses}] }}"
+
+    - name: Collected Network addresses
+      debug:
+        msg: "{{ [{'Host name': inventory_hostname}, {'Network addresses': network_addresses}] }}"
+
+    - name: Save MAC addresses from host {{inventory_hostname}} to file
+      delegate_to: 127.0.0.1
+      copy:
+        content: |
+          {% for addr in mac_addresses -%}
+          {{addr}}
+          {% endfor -%}
+        dest: "{{ dest_dir }}/{{ inventory_hostname }}-{{ mac_dest_file }}"
+        mode: 0600
+
+    - name: Save network addresses from host {{inventory_hostname}} to file
+      delegate_to: 127.0.0.1
+      copy:
+        content: |
+          {% for addr in network_addresses -%}
+          {{addr}}
+          {% endfor -%}
+        dest: "{{ dest_dir }}/{{ inventory_hostname }}-{{ network_dest_file }}"
+        mode: 0600
+
+    # https://stackoverflow.com/questions/43903134/ansible-accumulate-output-across-multiple-hosts-on-task-run
+    - name: Collect MACs from all hosts
+      delegate_to: 127.0.0.1
+      run_once: yes
+      set_fact:
+        all_mac_addresses: |-
+          {{ (all_mac_addresses | default([])) | union(item) }}
+      loop: "{{ ansible_play_hosts | map('extract', hostvars, 'mac_addresses') | list }}"
+
+    - name: Collect network addresses from all hosts
+      delegate_to: 127.0.0.1
+      run_once: yes
+      set_fact:
+        all_network_addresses: |-
+          {{ (all_network_addresses | default([])) | union(item) }}
+      loop: "{{ ansible_play_hosts | map('extract', hostvars, 'network_addresses') | list }}"
+
+    - name: Save all MAC addresses to file
+      delegate_to: 127.0.0.1
+      run_once: yes
+      copy:
+        content: |
+          {% for addr in all_mac_addresses -%}
+          {{addr}}
+          {% endfor -%}
+        dest: "{{ dest_dir }}/{{ mac_dest_file }}"
+        mode: 0600
+
+    - name: Save all network addresses to file
+      delegate_to: 127.0.0.1
+      run_once: yes
+      copy:
+        content: |
+          {% for addr in all_network_addresses -%}
+          {{addr}}
+          {% endfor -%}
+        dest: "{{ dest_dir }}/{{ network_dest_file }}"
+        mode: 0600
+
+    - name: Print the path of the files with MAC and network addresses
+      delegate_to: 127.0.0.1
+      run_once: yes
+      debug:
+        msg:
+          - "Output all MAC addresses to the file {{ dest_dir }}/{{ mac_dest_file }}"
+          - "Output all network addresses to the file {{ dest_dir }}/{{ network_dest_file }}"

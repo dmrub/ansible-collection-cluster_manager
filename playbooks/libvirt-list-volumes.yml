@@ -1,0 +1,31 @@
+---
+- name: List libvirt volumes
+  hosts: "{{ libvirt_host | default('libvirt') }}"
+  vars:
+    libvirt_vm_uri: "qemu:///system"
+
+    # Variables to add to the enviroment that is used to execute virsh commands
+    libvirt_vm_script_env: "{{  { 'LIBVIRT_DEFAULT_URI': libvirt_vm_uri } if libvirt_vm_uri else {} }}"
+
+  tasks:
+
+  - name: List virt pools
+    virt_pool:
+      command: list_pools
+      uri: "{{ libvirt_vm_uri | default(omit, true) }}"
+    register: pools_r
+
+  - name: Show pools_r
+    debug:
+      msg: "{{ pools_r.list_pools }}"
+
+  - name: List virt pools
+    virt_pool:
+      command: facts
+      uri: "{{ libvirt_vm_uri | default(omit, true) }}"
+    register: facts_r
+
+  - name: Show facts_r
+    debug:
+      msg: "{{ item.value.volumes }}"
+    loop: "{{ facts_r.ansible_facts.ansible_libvirt_pools | dict2items }}"

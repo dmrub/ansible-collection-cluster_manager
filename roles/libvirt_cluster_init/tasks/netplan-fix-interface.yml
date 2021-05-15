@@ -1,0 +1,55 @@
+---
+# Fix only network interfaces that have not been previously configured via guest_config or otherwise
+- name: Create configuration for non-primary interfaces
+  set_fact:
+    netplan_config: >-
+      {{ netplan_config | combine(
+          {'network': {
+              'ethernets': {
+                item.device: {
+                  'dhcp4': 'yes',
+                  'dhcp4-overrides': {
+                    'route-metric': 200
+                    }
+                  }
+                }
+              }
+          }, recursive=True)
+      }}
+  loop: "{{ network_interfaces }}"
+  vars:
+    netplan_dhcp4_defined: "{{ netplan_config.network.ethernets[item.device].dhcp4 is defined }}"
+    netplan_dhcp4: "{{ netplan_config.network.ethernets[item.device].dhcp4 | default(false) | bool }}"
+    netplan_route_metric_defined: "{{ netplan_config.network.ethernets[item.device]['dhcp4-overrides']['route-metric'] is defined }}"
+    netplan_route_metric: "{{ netplan_config.network.ethernets[item.device]['dhcp4-overrides']['route-metric'] | default(-1) | int }}"
+  when: >-
+    item.device != fix_interface.device and item.type != 'loopback' and
+    (not netplan_dhcp4_defined or netplan_dhcp4) and
+    (not netplan_route_metric_defined or netplan_route_metric == 200)
+
+- name: Create configuration for primary interface
+  set_fact:
+    netplan_config: >-
+      {{ netplan_config | combine(
+          {'network': {
+              'ethernets': {
+                fix_interface.device: {
+                  'match': { 'macaddress': fix_interface.macaddress },
+                  'dhcp4': 'yes',
+                  'dhcp4-overrides': {
+                    'route-metric': 100
+                  }
+                }
+              }
+            }
+          }, recursive=True)
+      }}
+  vars:
+    device: "{{ fix_interface.device }}"
+    netplan_dhcp4_defined: "{{ netplan_config.network.ethernets[device].dhcp4 is defined }}"
+    netplan_dhcp4: "{{ netplan_config.network.ethernets[device].dhcp4 | default(false) | bool }}"
+    netplan_route_metric_defined: "{{ netplan_config.network.ethernets[device]['dhcp4-overrides']['route-metric'] is defined }}"
+    netplan_route_metric: "{{ netplan_config.network.ethernets[device]['dhcp4-overrides']['route-metric'] | default(-1) | int }}"
+  when: >-
+    (not netplan_dhcp4_defined or netplan_dhcp4) and
+    (not netplan_route_metric_defined or netplan_route_metric == 100)

@@ -1,0 +1,8 @@
+---
+- name: Update apt cache
+  become: true
+  command: apt-get update -y
+
+- name: Install Python3
+  become: true
+  command: apt-get install -y --no-install-recommends python3 python3-pip

@@ -1,0 +1,76 @@
+---
+- name: Destroy VMs
+  hosts: "{{ libvirt_host | default('libvirt') }}"
+  vars:
+    libvirt_vm_uri: "qemu:///system"
+    # Variables to add to the enviroment that is used to execute virsh commands
+    libvirt_vm_script_env: "{{  { 'LIBVIRT_DEFAULT_URI': libvirt_vm_uri } if libvirt_vm_uri else {} }}"
+
+    request_confirmation: true
+  vars_prompt:
+    - name: "libvirt_cluster_config_file"
+      prompt: "Libvirt cluster config file to destroy (libvirt_cluster_config_file)"
+      private: no
+    - name: "destruction_confirmation"
+      prompt: "Are you sure you want to destroy cluster ? Type 'yes' to destroy your cluster."
+      default: "no"
+      private: no
+  pre_tasks:
+    - name: Check confirmation
+      fail:
+        msg: "Destruction confirmation failed"
+      when: destruction_confirmation != "yes"
+  tasks:
+    - name: Load configuration variables from file
+      include_vars:
+        file: "{{ libvirt_cluster_config_file }}"
+        name: libvirt_config
+
+    - name: Get all domains
+      block:
+        - name: List domains
+          environment: "{{ libvirt_vm_script_env }}"
+          command: >-
+            virsh list
+            --all
+            --name
+          changed_when: false
+          register: domains_r
+
+        - name: Set domain list
+          set_fact:
+            libvirt_domain_list: "{{ domains_r.stdout_lines }}"
+
+    - name: Get metadata
+      environment: "{{ libvirt_vm_script_env }}"
+      command: >-
+        virsh metadata {{ item | quote }} {{ metadata_uri | quote }} --config
+      failed_when: "metadata_r.rc != 0 and 'metadata not found' not in metadata_r.stderr"
+      vars:
+        metadata_uri: "http://example.org/xmlns/libvirt/1.0/lock"
+      loop: "{{ libvirt_config.libvirt_vms | map(attribute='name') | list }}"
+      when: item in libvirt_domain_list
+      register: metadata_r
+
+    - name: Read an metadata's attribute values
+      xml:
+        xmlstring: "{{ item.stdout }}"
+        xpath: /lock
+        content: attribute
+      register: xml_r
+      when: "item.rc is defined and item.rc == 0 and (item.stdout | trim | length > 0)"
+      loop: "{{ metadata_r.results }}"
+
+    - name: Fail if the domain was locked
+      fail:
+        msg: "Domain {{ item.item.item }} is locked, cluster cannot be destroyed"
+      when: "item.matches[0].lock.value | default(false) | bool"
+      loop: "{{ xml_r.results }}"
+
+    - name: Debug | Print loaded configuration
+      debug:
+        var: libvirt_config
+
+    - name: Destroy cluster
+      include_role:
+        name: libvirt_cluster_destroy

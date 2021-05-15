@@ -1,0 +1,4 @@
+---
+fix_bridged_interfaces: false
+netplan_config_file: "/etc/netplan/99-libvirt-netcfg.yaml"
+libvirt_config: {}

@@ -1,0 +1,27 @@
+---
+repos:
+    - url: https://github.com/dmrub/ansible-collection-cluster_manager
+      branch: main
+      dest: ext/cluster-manager
+      add_roles_path:
+          - ext/roles
+      copy:
+          - proj_dest: ext/cluster-manager/playbooks
+            repo_src: playbooks/
+          - proj_dest: ext/cluster-manager/roles
+            repo_src: roles/
+      symlink:
+          - proj_dest: ext/playbooks/cluster-manager
+            repo_src: playbooks
+          - proj_dest: ext/roles/libvirt_cluster_create
+            repo_src: roles/libvirt_cluster_create
+          - proj_dest: ext/roles/libvirt_cluster_destroy
+            repo_src: roles/libvirt_cluster_destroy
+          - proj_dest: ext/roles/libvirt_cluster_init
+            repo_src: roles/libvirt_cluster_init
+          - proj_dest: ext/roles/libvirt_host
+            repo_src: roles/libvirt_host
+          - proj_dest: ext/roles/libvirt_vm
+            repo_src: roles/libvirt_vm
+          - proj_dest: ext/roles/libvirt_network_hook
+            repo_src: roles/libvirt_network_hook

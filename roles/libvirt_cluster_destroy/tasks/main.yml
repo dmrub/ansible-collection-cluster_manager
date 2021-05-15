@@ -1,0 +1,45 @@
+---
+- name: Debug | Print libvirt_config
+  debug:
+    var: libvirt_config
+
+- name: Set destroy_libvirt_vms and destroy_libvirt_host_networks
+  set_fact:
+    destroy_libvirt_vms: []
+    destroy_libvirt_host_networks: []
+
+- name: Set destroy_libvirt_vms state to absent
+  set_fact:
+    destroy_libvirt_vms: >-
+      {{ destroy_libvirt_vms + [item | combine({'state': 'absent'})] }}
+  loop: "{{ libvirt_config.libvirt_vms }}"
+  when: libvirt_config.libvirt_vms is defined
+
+- name: Set destroy_libvirt_host_networks state to absent
+  set_fact:
+    destroy_libvirt_host_networks: >-
+      {{ destroy_libvirt_host_networks + [item | combine({'state': 'absent'})] }}
+  loop: "{{ libvirt_config.libvirt_host_networks }}"
+  when: libvirt_config.libvirt_host_networks is defined
+
+- name: Debug | Print destroy_libvirt_vms
+  debug:
+    var: destroy_libvirt_vms
+
+- name: Debug | Print destroy_libvirt_host_networks
+  debug:
+    var: destroy_libvirt_host_networks
+
+- name: Destroy VMs
+  include_role:
+    name: libvirt_vm
+  vars:
+    libvirt_vms: "{{ destroy_libvirt_vms }}"
+  when: destroy_libvirt_vms is defined
+
+- name: Destroy VM Networks
+  include_role:
+    name: libvirt_host
+  vars:
+    libvirt_host_networks: "{{ destroy_libvirt_host_networks }}"
+  when: destroy_libvirt_host_networks is defined

@@ -1,0 +1,228 @@
+---
+- name: Backup libvirt configuration
+  hosts: "{{ libvirt_host | default('libvirt') }}"
+  vars_prompt:
+    - name: libvirt_domains
+      prompt: "Libvirt domain(s) (separate by ' ' or ',')"
+      private: no
+
+    - name: libvirt_networks
+      prompt: "Libvirt networks(s) (separate by ' ' or ',')"
+      private: no
+
+  vars:
+    libvirt_vm_uri: "qemu:///system"
+    dest_dir: "."
+
+    # Variables to add to the enviroment that is used to execute virsh commands
+    libvirt_vm_script_env: "{{  { 'LIBVIRT_DEFAULT_URI': libvirt_vm_uri } if libvirt_vm_uri else {} }}"
+
+  tasks:
+    - set_fact:
+        libvirt_domain_list: >-
+          {{ (libvirt_domains | default('')).strip().replace(' ',',').split(',') |
+               reject('equalto', '') | list
+          }}
+        libvirt_network_list: >-
+          {{ (libvirt_networks | default('')).strip().replace(' ',',').split(',') |
+               reject('equalto', '') | list
+          }}
+      tags:
+        - networks
+        - domains
+
+    - name: Get all domains if none specified
+      block:
+        - name: List domains
+          environment: "{{ libvirt_vm_script_env }}"
+          command: >-
+            virsh list
+            --all
+            --name
+          changed_when: false
+          register: domains_r
+
+        - name: Set domain list
+          set_fact:
+            libvirt_domain_list: "{{ domains_r.stdout_lines }}"
+      when: libvirt_domain_list | length == 0
+      tags:
+        - domains
+
+    - name: Get all networks if none specified
+      block:
+        - name: List networks
+          environment: "{{ libvirt_vm_script_env }}"
+          command: >-
+            virsh net-list
+            --all
+            --name
+          changed_when: false
+          register: networks_r
+
+        - name: Set network list
+          set_fact:
+            libvirt_network_list: "{{ networks_r.stdout_lines }}"
+      when: libvirt_network_list | length == 0
+      tags:
+        - networks
+
+    - name: List snapshots
+      environment: "{{ libvirt_vm_script_env }}"
+      command: >-
+        virsh snapshot-list
+        --domain {{ item | quote }}
+        --name
+      changed_when: false
+      loop: "{{ libvirt_domain_list }}"
+      register: snapshots_r
+      tags:
+        - domains
+
+    - name: Set initial values for domains
+      set_fact:
+        snapshots: {}
+        domains: []
+      tags:
+        - domains
+
+    - name: Set variables for domains
+      set_fact:
+        domains: "{{ domains + [ item.item ] }}"
+        snapshots: "{{ snapshots | combine({item.item: item.stdout_lines}) }}"
+      loop: "{{ snapshots_r.results }}"
+      tags:
+        - domains
+
+    - set_fact:
+        snapshot_list: "{{ _snapshot_list }}"
+      vars:
+        _snapshot_list: >-
+          [
+          {% for domain, snapshot_names in snapshots.items() %}
+            {% for snapshot_name in snapshot_names %}
+              {"domain": {{ domain | to_json }}, "snapshot": {{ snapshot_name | to_json }} }
+              {%- if not loop.last %}
+              ,
+              {% endif %}
+            {% endfor %}
+            {%- if (snapshot_names|length) > 0 and not loop.last %}
+            ,
+            {% endif %}
+          {% endfor %}
+          ]
+      tags:
+        - domains
+
+
+    - name: Create temporary backup directory
+      tempfile:
+        state: directory
+        suffix: _libvirt_backup
+      register: libvirt_backup_dir
+      tags:
+        - networks
+        - domains
+
+    - debug:
+        msg: "Backup dir: {{libvirt_backup_dir.path}}"
+      tags:
+        - networks
+        - domains
+
+    - name: Create backup directories
+      file:
+        path: "{{ libvirt_backup_dir.path }}/{{ item }}"
+        state: directory
+      loop:
+        - networks
+        - domains
+      tags:
+        - networks
+        - domains
+
+    - name: Create backup directories for every domain
+      file:
+        path: "{{ libvirt_backup_dir.path }}/domains/{{ item }}"
+        state: directory
+      loop: "{{ domains }}"
+      tags:
+        - domains
+
+    - debug:
+        var: snapshot_list
+      tags:
+        - domains
+
+    - name: Dump networks
+      environment: "{{ libvirt_vm_script_env }}"
+      shell: >-
+        virsh net-dumpxml --network {{ item | quote }} >
+        {{ libvirt_backup_dir.path | quote }}/networks/{{ item | quote }}.xml
+      loop: "{{ libvirt_network_list }}"
+      tags:
+        - networks
+
+    - name: Dump snapshots
+      environment: "{{ libvirt_vm_script_env }}"
+      shell: >-
+        virsh snapshot-dumpxml --domain {{ item.domain | quote }}
+        --snapshotname {{ item.snapshot | quote }}
+        --security-info >
+        {{ libvirt_backup_dir.path | quote }}/domains/{{ item.domain | quote }}/{{ item.domain }}-snapshot-{{ item.snapshot }}.xml
+      loop: "{{ snapshot_list }}"
+      tags:
+        - domains
+
+    - name: Dump domains
+      environment: "{{ libvirt_vm_script_env }}"
+      shell: >-
+        virsh dumpxml --domain {{ item | quote }} --migratable >
+        {{ libvirt_backup_dir.path | quote }}/domains/{{ item | quote}}/{{ item | quote }}.xml
+      loop: "{{ libvirt_domain_list }}"
+      tags:
+        - domains
+
+    - name: Set backup file name
+      set_fact:
+        backup_file_name: >-
+          {{ '%s/libvirt-backup-%s-%s.tar.gz' |
+          format(libvirt_backup_dir.path,
+          inventory_hostname,
+          lookup('pipe', 'date +%Y%m%d-%H%M') | trim)
+          }}
+      tags:
+        - networks
+        - domains
+
+    - name: Archive data to a backup file
+      command: >-
+        tar -cvzf {{ backup_file_name | quote }}
+        -C {{ libvirt_backup_dir.path | quote }}
+        domains networks
+      args:
+        warn: false
+      tags:
+        - networks
+        - domains
+
+    - name: Copy backup tarball to ansible host
+      become: yes
+      fetch:
+        src: "{{ backup_file_name }}"
+        dest: "{{ dest_dir }}/"
+        flat: yes
+        validate_checksum: no
+      tags:
+        - networks
+        - domains
+
+    - name: Remove temporary backup directory {{ libvirt_backup_dir.path }}
+      become: true
+      when: libvirt_backup_dir.path is defined
+      file:
+        path: "{{ libvirt_backup_dir.path }}"
+        state: absent
+      tags:
+        - networks
+        - domains

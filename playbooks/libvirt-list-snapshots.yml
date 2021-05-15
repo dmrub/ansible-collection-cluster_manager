@@ -1,0 +1,58 @@
+---
+- name: List libvirt snapshots
+  hosts: "{{ libvirt_host | default('libvirt') }}"
+  vars_prompt:
+    - name: libvirt_domains
+      prompt: "Libvirt domain(s) (separate by ' ' or ',')"
+      private: no
+
+  vars:
+    libvirt_vm_uri: "qemu:///system"
+
+    # Variables to add to the enviroment that is used to execute virsh commands
+    libvirt_vm_script_env: "{{  { 'LIBVIRT_DEFAULT_URI': libvirt_vm_uri } if libvirt_vm_uri else {} }}"
+
+  tasks:
+    - set_fact:
+        libvirt_domain_list: |-
+          {{ (libvirt_domains | default('')).strip().replace(' ',',').split(',') |
+               reject('equalto', '') | list
+          }}
+
+    - name: Get all domains if none specified
+      block:
+        - name: List domains
+          environment: "{{ libvirt_vm_script_env }}"
+          command: >
+            virsh list
+            --all
+            --name
+          changed_when: false
+          register: domains_r
+
+        - name: Set domain list
+          set_fact:
+            libvirt_domain_list: "{{ domains_r.stdout_lines }}"
+      when: libvirt_domain_list | length == 0
+
+    - name: List snapshots
+      environment: "{{ libvirt_vm_script_env }}"
+      command: >
+        virsh snapshot-list
+        --domain {{ item | quote }}
+        --name
+      changed_when: false
+      loop: "{{ libvirt_domain_list }}"
+      register: snapshots_r
+
+    - set_fact:
+        snapshots: {}
+
+    - set_fact:
+        snapshots: "{{ snapshots | combine({item.item: item.stdout_lines}) }}"
+      loop: "{{ snapshots_r.results }}"
+
+    - debug:
+        var: snapshots
+        # var: snapshots_r.results
+        # msg: snapshots_r #"{{ snapshots_r.results.stdout_lines }}"

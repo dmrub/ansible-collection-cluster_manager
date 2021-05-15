@@ -1,0 +1,4 @@
+---
+# defaults file for libvirt-network-hook
+libvirt_hooks_dir: /etc/libvirt/hooks
+libvirt_network_config_file: /etc/libvirt/libvirt-networks.conf

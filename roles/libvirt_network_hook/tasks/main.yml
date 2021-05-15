@@ -1,0 +1,125 @@
+---
+# tasks file for libvirt-network-hook
+
+- name: Set up dependencies on RedHat.
+  include_tasks: setup-RedHat.yml
+  when:
+    - ansible_os_family == 'RedHat'
+    - ansible_distribution != 'Fedora'
+
+- name: Set up dependencies on Fedora.
+  include_tasks: setup-Fedora.yml
+  when: ansible_distribution == 'Fedora'
+
+- name: Set up dependencies on Ubuntu.
+  include_tasks: setup-Ubuntu.yml
+  when: ansible_distribution == 'Ubuntu'
+
+- name: Set up dependencies on Debian.
+  include_tasks: setup-Debian.yml
+  when: ansible_distribution == 'Debian'
+
+- name: Create libvirt hooks directory if it does not exist
+  become: yes
+  file:
+    path: "{{ libvirt_hooks_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Copy libvirt network hook
+  become: yes
+  copy:
+    src: "network.py"
+    dest: "{{ libvirt_hooks_dir }}/network"
+    owner: root
+    group: root
+    mode:  '0755'
+
+- name: Update network interfaces in libvirt network config file
+  become: yes
+  ini_file:
+    path: "{{ libvirt_network_config_file }}"
+    section: "network-interfaces"
+    no_extra_spaces: yes
+    option: "{{ item.name }}"
+    value: "{{ item.gateway_ip }}"
+    mode: '0644'
+    backup: yes
+  loop: "{{ libvirt_network_interfaces | default([]) }}"
+
+- name: Read network configuration
+  become: yes
+  read_ini:
+    path: "{{ libvirt_network_config_file }}"
+    section: "libvirt-networks"
+  register: network_config
+  ignore_errors: true
+
+- name: Check network configuration conflicts
+  fail:
+    msg: >-
+      Conflict: network {{ network_name }} has the same routing table ID
+      {{ network_routing_table }} as the network {{ network_name_in_file }}
+      in the configuration file {{ libvirt_network_config_file }}
+  when: network_routing_table == network_routing_table_in_file and network_name != network_name_in_file
+  vars:
+    network_name: "{{ item[0].name }}"
+    network_routing_table: "{{ item[0].routing_table | int }}"
+    network_name_in_file: "{{ item[1].key | regex_replace('^(.*)\\.routing_table$', '\\1') }}"
+    network_routing_table_in_file: "{{ item[1].value | int }}"
+  loop: |-
+    {{   (libvirt_networks | default([]))
+       | product(network_config.value | default({}) | dict2items | selectattr('key', 'match', '.*\.routing_table$'))
+       | list
+    }}
+
+- name: Init network config options
+  set_fact:
+    libvirt_network_config_options: []
+
+- name: Update network config options with libvirt_network_interfaces
+  set_fact:
+    libvirt_network_config_options: |-
+      {{ libvirt_network_config_options + [
+           {
+           'section': 'network-interfaces',
+           'option': item.name,
+           'value': item.gateway_ip
+           }
+         ]
+      }}
+  loop: "{{ libvirt_network_interfaces | default([]) }}"
+
+- name: Update network config options with libvirt_networks
+  set_fact:
+    libvirt_network_config_options: |-
+      {{ libvirt_network_config_options + [
+           {
+           'section': 'libvirt-networks',
+           'option': item.name + '.routing_table',
+           'value': item.routing_table
+           },
+           {
+           'section': 'libvirt-networks',
+           'option': item.name + '.rule_priority',
+           'value': item.rule_priority
+           }
+         ]
+      }}
+  loop: "{{ libvirt_networks | default([]) }}"
+
+- name: "Debug: Print network config options to be applied"
+  debug:
+    msg: "{{ libvirt_network_config_options }}"
+
+- name: Update libvirt network config file
+  become: yes
+  ini_file:
+    path: "{{ libvirt_network_config_file }}"
+    no_extra_spaces: yes
+    section: "{{ item.section }}"
+    option: "{{ item.option }}"
+    value: "{{ item.value }}"
+    mode: '0644'
+    backup: yes
+  loop: "{{ libvirt_network_config_options }}"

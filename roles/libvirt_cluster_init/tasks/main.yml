@@ -1,0 +1,631 @@
+---
+- name: Init defaults
+  set_fact:
+    has_netplan: false
+    netplan_path: ''
+    has_nmcli: false
+    nmcli_path: ''
+    libvirt_network_interfaces: []
+    libvirt_bridged_interfaces_macaddresses: []
+    network_interfaces: []
+    network_interfaces_by_device: {}
+    network_interfaces_by_macaddress: {}
+    _guest_config_by_macaddress: {}
+    _fix_labeled_interfaces_macaddresses: []
+    _fix_interfaces_with_macaddresses: []
+
+- name: Get all VM network interfaces from configuration
+  set_fact:
+    libvirt_network_interfaces: >-
+      {{ libvirt_network_interfaces + item.interfaces }}
+  loop: "{{ libvirt_config.libvirt_vms }}"
+  when: libvirt_config.libvirt_vms is defined
+
+- name: Check if guest config can be applied
+  fail:
+    msg: "Guest configuration cannot be applied to the network because no MAC address is defined"
+  when: item.guest_config is defined and item.mac is not defined
+  loop: "{{ libvirt_network_interfaces }}"
+
+- name: Get guest config of network interfaces
+  set_fact:
+    _guest_config_by_macaddress: >-
+      {{ _guest_config_by_macaddress | combine({item.mac: item.guest_config}) }}
+  loop: "{{ libvirt_network_interfaces }}"
+  when: item.guest_config is defined and item.mac is defined
+
+- name: Check if we can get MACs of bridged network interfaces
+  fail:
+    msg: "Warning: A bridge interface without explicit MAC address was defined"
+  when: >-
+    ((item.type is defined and item.type == 'bridge') or (item.bridge is defined and item.bridge | length > 0)) and
+    (item.mac is not defined)
+  loop: "{{ libvirt_network_interfaces }}"
+  ignore_errors: yes
+
+- name: Get MACs of bridged network interfaces
+  set_fact:
+    libvirt_bridged_interfaces_macaddresses: >-
+      {{ libvirt_bridged_interfaces_macaddresses + [item.mac] }}
+  loop: "{{ libvirt_network_interfaces }}"
+  when: >-
+    ((item.type is defined and item.type == 'bridge') or (item.bridge is defined and item.bridge | length > 0)) and
+    (item.mac is defined)
+
+- name: Check if we can get MACs of labeled network interfaces to fix
+  fail:
+    msg: "Warning: A labeled interface without explicit MAC address was defined"
+  when: >-
+    item.label is defined and
+    fix_interfaces_with_label in item.label and
+    item.mac is not defined
+  loop: "{{ libvirt_network_interfaces if fix_interfaces_with_label is defined else [] }}"
+  ignore_errors: yes
+
+- name: Get MACs of labeled network interfaces to fix
+  set_fact:
+    _fix_labeled_interfaces_macaddresses: >-
+      {{ _fix_labeled_interfaces_macaddresses + [item.mac] }}
+  loop: "{{ libvirt_network_interfaces if fix_interfaces_with_label is defined else [] }}"
+  when: >-
+    item.label is defined and
+    fix_interfaces_with_label in item.label and
+    item.mac is defined
+
+#- name: Debug | Print libvirt_config
+#  debug:
+#    var: libvirt_config
+
+#- name: Debug | Print libvirt_network_interfaces
+#  debug:
+#    var: libvirt_network_interfaces
+
+#- name: Debug | Print libvirt_bridged_interfaces_macaddresses
+#  debug:
+#    var: libvirt_bridged_interfaces_macaddresses
+
+- name: Debug | Print _fix_labeled_interfaces_macaddresses
+  debug:
+    var: _fix_labeled_interfaces_macaddresses
+
+- name: Debug | Print _guest_config_by_macaddress
+  debug:
+    var: _guest_config_by_macaddress
+
+- name: Check raw command
+  raw: sh -c "echo 'raw command is ok'; exit 0"
+  register: sh_result
+  retries: 5
+  delay: 10
+  until: sh_result.rc == 0 and 'raw command is ok' in sh_result.stdout
+
+#- name: Wait for target connection to become reachable/usable
+#  wait_for_connection:
+#    connect_timeout: 5
+#    delay: 0
+#    sleep: 1
+#    timeout: 600
+
+#- name: Print hosts to wait for
+#  debug:
+#    msg: "Wait for SSH access to {{ hostvars[inventory_hostname].ansible_host  }}:{{ hostvars[inventory_hostname].ansible_port }} with user {{ hostvars[inventory_hostname].ansible_user }} via {{ item }}"
+#  loop: "{{ groups[ (libvirt_host | default('libvirt')) ] | default([libvirt_host]) }}"
+#
+#- name: Wait for SSH banners
+#  wait_for:
+#    port: "{{ hostvars[inventory_hostname].ansible_port }}"
+#    host: "{{ hostvars[inventory_hostname].ansible_host }}"
+#    search_regex: OpenSSH
+#    delay: 5
+#  #delegate_to: "{{ item }}"
+#  # Since libvirt_host might be a single host or a group we need to check both possibilities
+#  #loop: "{{ groups[ (libvirt_host | default('libvirt')) ] | default([libvirt_host]) }}"
+
+- name: Install python if required
+  become: yes
+  raw: >-
+        sh -c "set -e; \
+               if ! test -e /usr/bin/python && ! test -e /usr/bin/python3; then \
+                 if [ -n \"$(command -v apt-get)\" ]; then \
+                  (sed -i 's/^deb cdrom/# deb cdrom/g' /etc/apt/sources.list && \
+                   apt-get update -qy && \
+                   apt-get install -qy --no-install-recommends python-minimal python-simplejson); \
+                 elif [ -n \"$(command -v yum)\" ]; then \
+                  (yum install python3-pip -y || \
+                   yum install python3 -y || \
+                   yum install python -y); \
+                 fi; \
+               fi;"
+
+- name: Detect python executable
+  raw: >-
+        sh -c "set -e; \
+               found=false; \
+               for c in python3 python; do if command -v \$c; then found=true; break; fi; done; \
+               if [ x\$found = xfalse ]; then exit 1; fi;
+              "
+  changed_when: false
+  failed_when: python_path_result.rc != 0 or (python_path_result.stdout | trim | length) == 0
+  register: python_path_result
+
+- name: "Debug | Path to python in the VM"
+  debug:
+    var: python_path_result
+
+- name: Set python interpreter
+  set_fact:
+    ansible_python_interpreter: "{{ python_path_result.stdout | trim }}"
+
+- name: Set hostname
+  become: yes
+  hostname:
+    name: "{{ inventory_hostname }}"
+
+- name: Gather information
+  setup:
+  # delegate_to: "{{item}}"
+  # delegate_facts: True
+  # loop: "{{ ansible_play_hosts }}"
+
+- name: Debug | Network configuration
+  debug:
+    msg:
+      - "item = {{item}}"
+      - "host_interface = {{ hostvars[item].host_interface | default('') }}"
+      - "ansible_default_ipv4 = {{ hostvars[item].ansible_default_ipv4 | default('') }}"
+      - "host_ipv4: {{ hostvars[item].host_ipv4 | default('') }}"
+      - "host_aliases = {{ hostvars[item].host_aliases | default('') }}"
+      - "address = {{ hostvars[item].ansible_default_ipv4 | default(omit) }}"
+  loop: "{{ ansible_play_hosts }}"
+
+- name: Remove hosts
+  become: yes
+  lineinfile:
+    dest: /etc/hosts
+    regexp: '^\S+\s+{{ item }}(\s.*)?$'
+    state: absent
+  loop: "{{ ansible_play_hosts }}"
+
+- name: Add mappings to /etc/hosts
+  become: yes
+  blockinfile:
+    dest: /etc/hosts
+    block: |
+      {% for item in ansible_play_hosts %}
+      {% set host_alias = hostvars[item].ansible_default_ipv4.alias | default('') %}
+      {% set host_interface = hostvars[item].host_interface | default( host_alias ) %}
+      {% set alt_host_ipv4 = hostvars[item]['ansible_' + host_interface]['ipv4']['address'] | default(hostvars[item].ansible_host) %}
+      {% set host_ipv4 = hostvars[item].host_ipv4 | default( alt_host_ipv4 ) %}
+      {{ host_ipv4 }} {{item}} {{ hostvars[item].host_aliases|default('') }}
+      {% endfor %}
+    marker: "# Ansible inventory hosts {mark}"
+
+- name: Gather network interfaces
+  set_fact:
+    network_interfaces: >-
+      {{ network_interfaces + [hostvars[inventory_hostname]['ansible_%s' | format(item)]] }}
+  loop: "{{ ansible_interfaces }}"
+
+- name: Filter network interfaces
+  set_fact:
+    network_interfaces_by_macaddress: >-
+      {{ network_interfaces_by_macaddress | combine({item.macaddress : item}) }}
+    network_interfaces_by_device: >-
+      {{ network_interfaces_by_device | combine({item.device : item}) }}
+  loop: "{{ network_interfaces }}"
+  when: item.type != 'loopback'
+
+- name: Check if we fix interfaces with the specified MAC addresses
+  set_fact:
+    _fix_interfaces_with_macaddresses: "{{ fix_interfaces_with_macaddresses }}"
+  when: fix_interfaces_with_macaddresses | default([]) | length > 0
+
+- name: Check if we fix bridged interfaces
+  set_fact:
+    _fix_interfaces_with_macaddresses: "{{ libvirt_bridged_interfaces_macaddresses }}"
+  when: >-
+    (_fix_interfaces_with_macaddresses | length == 0) and
+    ((fix_bridged_interfaces | default(false)) and libvirt_bridged_interfaces_macaddresses | length > 0)
+
+- name: Check if we fix labeled interfaces
+  set_fact:
+    _fix_interfaces_with_macaddresses: "{{ _fix_labeled_interfaces_macaddresses }}"
+  when: >-
+    (_fix_interfaces_with_macaddresses | length == 0) and
+    (_fix_labeled_interfaces_macaddresses | length > 0)
+
+# Network configuration with netplan (Ubuntu)
+
+- name: Check if netplan executable exists
+  shell: command -v netplan 2>/dev/null
+  failed_when: False
+  changed_when: False
+  register: netplan_command_result
+
+- name: Setup vars for netplan configuration
+  set_fact:
+    has_netplan: true
+    netplan_path: "{{ netplan_command_result.stdout }}"
+    netplan_config: {'network': {'ethernets': {}}}
+  when: netplan_command_result.rc == 0
+
+- name: Configure networks with netplan
+  when: has_netplan
+  block:
+
+    - name: Debug | Print guest info
+      debug:
+        msg:
+          - "macaddress: {{ item.key }}"
+          - "guest_config: {{ item.value }}"
+          - "network_interface: {{ network_interfaces_by_macaddress[item.key] }}"
+      when: item.key in network_interfaces_by_macaddress
+      loop: "{{ _guest_config_by_macaddress | dict2items }}"
+
+    - name: Setup netplan config from guest configuration
+      set_fact:
+        netplan_config: >-
+          {{  netplan_config
+            | combine(
+              {'network': {
+                  'ethernets': {
+                    network_interface.device: {
+                      'match': { 'macaddress': macaddress },
+                      'dhcp4': dhcp4
+                    }
+                  }
+                }
+              }, recursive=True)
+            | combine(
+              {'network': {
+                  'ethernets': {
+                    network_interface.device: {
+                      'dhcp4-overrides': dhcp4_overrides
+                    }
+                  }
+                }
+              } if add_dhcp4_overrides else {}, recursive=True)
+            | combine(
+              {'network': {
+                  'ethernets': {
+                    network_interface.device: {
+                      'gateway4': gateway4
+                    }
+                  }
+                }
+              } if add_gateway4 else {}, recursive=True)
+            | combine(
+              {'network': {
+                  'ethernets': {
+                    network_interface.device: {
+                      'addresses': addresses
+                    }
+                  }
+                }
+              } if add_addresses else {}, recursive=True)
+            | combine(
+              {'network': {
+                  'ethernets': {
+                    network_interface.device: {
+                      'nameservers': {
+                          'addresses' : nameservers_addresses
+                      }
+                    }
+                  }
+                }
+              } if add_nameservers_addresses else {}, recursive=True)
+            | combine(
+              {'network': {
+                  'ethernets': {
+                    network_interface.device: {
+                      'routes': routes
+                    }
+                  }
+                }
+              } if add_routes else {}, recursive=True)
+          }}
+      vars:
+        macaddress: "{{ item.key }}"
+        guest_config: "{{ item.value }}"
+        network_interface: "{{ network_interfaces_by_macaddress[item.key] }}"
+        dhcp4: "{{ guest_config.dhcp4 | default(false) | ternary('yes', 'no') }}"
+        add_dhcp4_overrides: "{{ guest_config.route_metric4 is defined }}"
+        dhcp4_overrides: >-
+          {{
+            {} | combine({'route-metric': guest_config.route_metric4} if guest_config.route_metric4 is defined else {})
+          }}
+        add_addresses: "{{ guest_config.ip4 is defined }}"
+        addresses: "{{ guest_config.ip4 | default([]) }}"
+        add_gateway4: "{{ guest_config.gateway4 is defined }}"
+        gateway4: "{{ guest_config.gateway4 | default('') }}"
+        add_nameservers_addresses: "{{ guest_config.dns4 is defined }}"
+        nameservers_addresses: "{{ guest_config.dns4 | default([]) }}"
+        add_routes: "{{ guest_config.routes4 is defined }}"
+        _routes: |
+          [
+            {% for route in (guest_config.routes4 | default([])) %}
+            {{ route | combine(
+                 {'metric': guest_config.route_metric4}
+                 if route.metric is not defined and guest_config.route_metric4 is defined else {}
+               ) | to_json
+            }}
+            {%-  if not loop.last %}
+            ,
+            {%   endif %}
+            {% endfor %}
+          ]
+        routes: "{{ (_routes | from_json) if _routes is string else _routes }}"
+      when: item.key in network_interfaces_by_macaddress
+      loop: "{{ _guest_config_by_macaddress | dict2items }}"
+
+    - name: Debug | Print generated netplan configuration
+      debug:
+        var: netplan_config
+
+    - name: netplan | Fix network interfaces
+      include_tasks: "netplan-fix-interface.yml"
+      vars:
+        fix_interface: "{{ network_interfaces_by_macaddress[(macaddress|lower)] }}"
+      loop: "{{ _fix_interfaces_with_macaddresses }}"
+      loop_control:
+        loop_var: macaddress
+      when: (macaddress|lower) in network_interfaces_by_macaddress
+
+    - name: Debug | Print final netplan configuration
+      debug:
+        var: netplan_config
+
+    - name: Write netplan configuration to file
+      become: yes
+      copy:
+        content: "{{ netplan_config | to_nice_yaml(indent=2, width=50, explicit_start=True, explicit_end=True) }}"
+        dest: "{{ netplan_config_file }}"
+
+    - name: Apply netplan
+      become: yes
+      command: "{{ netplan_path }} apply"
+
+
+
+# Network configuration with NetworkManager nmcli (RedHat, CentOS, Fedora, etc.)
+
+- name: Check if nmcli executable exists
+  shell: command -v nmcli 2>/dev/null
+  failed_when: False
+  changed_when: False
+  register: nmcli_command_result
+
+- name: Setup vars for nmcli configuration
+  set_fact:
+    has_nmcli: true
+    nmcli_path: "{{ nmcli_command_result.stdout }}"
+  when: nmcli_command_result.rc == 0
+
+
+- name: Configure networks with nmcli
+  when: has_nmcli
+  block:
+
+    - name: nmcli | Get all devices
+      command: "{{ nmcli_path | quote }} -f DEVICE,TYPE,STATE,CONNECTION,CON-UUID -t -m tabular device"
+      register: nmcli_dev_result
+
+    - name: Debug | Print nmcli_dev_result
+      debug:
+        var: nmcli_dev_result
+
+    - name: nmcli | Decode nmcli_dev_result
+      set_fact:
+        nmcli_dev_list: "{{ value }}"
+      vars:
+        value: |
+          [
+            {% for line in nmcli_dev_result.stdout_lines %}
+            {%   set dev = line.split(':') %}
+            {{
+                {
+                  'device': dev[0]|default(''),
+                  'type': dev[1]|default(''),
+                  'state': dev[2]|default(''),
+                  'connection': dev[3]|default(''),
+                  'con_uuid': dev[4]|default('')
+                } | to_json
+            }}
+            {%-  if not loop.last %}
+            ,
+            {%   endif %}
+            {% endfor %}
+          ]
+
+    #- name: Get all connections with devices to be disabled
+    #  shell: >-
+    #    {{ nmcli_path }} -t -m tabular con show
+    #  register: nmcli_conn_result
+
+    #- name: Debug | Print nmcli_conn_result
+    #  debug:
+    #    var: nmcli_conn_result
+
+    - name: nmcli | Create device to connection dict
+      set_fact:
+        nmcli_dev_dict: >-
+          {{ nmcli_dev_dict | default({}) | combine({item.device : item}) }}
+      loop: "{{ nmcli_dev_list }}"
+
+    - name: Debug | Print command to create or modify connections
+      debug:
+        msg: >-
+          {{ nmcli_path | quote }}
+          {% if create_nmcli_connection %}
+          con add type ethernet ifname {{ network_interface.device | quote }} con-name {{ network_interface.device | quote }}
+          {% else %}
+          con modify {{ nmcli_connection | quote }}
+          {% endif %}
+          ipv4.method {{ dhcp4 | ternary('auto', 'manual') }}
+          {% if add_ip4_route_metric %}
+          ipv4.route-metric {{ ip4_route_metric }}
+          {% endif %}
+          {% if add_ip4_addresses %}
+          ipv4.addresses {{ ip4_addresses | join(' ') | quote }}
+          {% endif %}
+          {% if add_gateway4 %}
+          ipv4.gateway {{ gateway4 | quote }}
+          {% endif %}
+          {% if add_dns4 %}
+          ipv4.dns {{ dns4 | join(' ') | quote }}
+          {% endif %}
+          {% if add_routes4 %}
+          ipv4.routes {{ routes4 | join(',') | quote }}
+          {% endif %} &&
+          {{ nmcli_path | quote }} con down {{ nmcli_connection | quote }} &&
+          {{ nmcli_path | quote }} con up {{ nmcli_connection | quote }}
+      vars:
+        macaddress: "{{ item.key }}"
+        guest_config: "{{ item.value }}"
+        network_interface: "{{ network_interfaces_by_macaddress[item.key] }}"
+        dhcp4: "{{ guest_config.dhcp4 | default(false) }}"
+        add_ip4_route_metric: "{{ guest_config.route_metric4 is defined }}"
+        ip4_route_metric: "{{ guest_config.route_metric4 | default(-1) | int }}"
+        add_ip4_addresses: "{{ guest_config.ip4 is defined }}"
+        ip4_addresses: "{{ guest_config.ip4 | default([]) }}"
+        add_gateway4: "{{ guest_config.gateway4 is defined }}"
+        gateway4: "{{ guest_config.gateway4 | default('') }}"
+        add_dns4: "{{ guest_config.dns4 is defined }}"
+        dns4: "{{ guest_config.dns4 | default([]) }}"
+        add_routes4: "{{ guest_config.routes4 is defined }}"
+        _routes4: |
+          [
+            {% for route in (guest_config.routes4 | default([])) %}
+            {% set metric = route.metric | default(guest_config.route_metric4 if guest_config.route_metric4 is defined else '') %}
+            {# 0.0.0.0/0 is special case #}
+            {# https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/7/html/networking_guide/configuring-policy-based-routing-to-define-alternative-routes #}
+            {% if (route.to | string | trim) == '0.0.0.0/0' %}
+            {{ ('0.0.0.0/1 ' ~ route.via ~ ' ' ~ metric) | trim | to_json }},
+            {{ ('128.0.0.0/1 ' ~ route.via ~ ' ' ~ metric) | trim | to_json }}
+            {% else %}
+            {{ (route.to ~ ' ' ~ route.via ~ ' ' ~ metric) | trim | to_json }}
+            {% endif %}
+            {%-  if not loop.last %}
+            ,
+            {%   endif %}
+            {% endfor %}
+          ]
+        routes4: "{{ (_routes4 | from_json) if _routes4 is string else _routes4 }}"
+        create_nmcli_connection: "{{ nmcli_dev_dict[network_interface.device].connection is not defined }}"
+        nmcli_connection: "{{ nmcli_dev_dict[network_interface.device].connection | default(network_interface.device) }}"
+      when: item.key in network_interfaces_by_macaddress
+      loop: "{{ _guest_config_by_macaddress | dict2items }}"
+
+    - name: nmcli | Create or modify connections
+      become: true
+      shell: >-
+          {{ nmcli_path | quote }}
+          {% if create_nmcli_connection %}
+          con add type ethernet ifname {{ network_interface.device | quote }} con-name {{ network_interface.device | quote }}
+          {% else %}
+          con modify {{ nmcli_connection | quote }}
+          {% endif %}
+          ipv4.method {{ dhcp4 | ternary('auto', 'manual') }}
+          {% if add_ip4_route_metric %}
+          ipv4.route-metric {{ ip4_route_metric }}
+          {% endif %}
+          {% if add_ip4_addresses %}
+          ipv4.addresses {{ ip4_addresses | join(' ') | quote }}
+          {% endif %}
+          {% if add_gateway4 %}
+          ipv4.gateway {{ gateway4 | quote }}
+          {% endif %}
+          {% if add_dns4 %}
+          ipv4.dns {{ dns4 | join(' ') | quote }}
+          {% endif %}
+          {% if add_routes4 %}
+          ipv4.routes {{ routes4 | join(',') | quote }}
+          {% endif %} &&
+          {{ nmcli_path | quote }} con down {{ nmcli_connection | quote }} &&
+          {{ nmcli_path | quote }} con up {{ nmcli_connection | quote }}
+      vars:
+        macaddress: "{{ item.key }}"
+        guest_config: "{{ item.value }}"
+        network_interface: "{{ network_interfaces_by_macaddress[item.key] }}"
+        dhcp4: "{{ guest_config.dhcp4 | default(false) }}"
+        add_ip4_route_metric: "{{ guest_config.route_metric4 is defined }}"
+        ip4_route_metric: "{{ guest_config.route_metric4 | default(-1) | int }}"
+        add_ip4_addresses: "{{ guest_config.ip4 is defined }}"
+        ip4_addresses: "{{ guest_config.ip4 | default([]) }}"
+        add_gateway4: "{{ guest_config.gateway4 is defined }}"
+        gateway4: "{{ guest_config.gateway4 | default('') }}"
+        add_dns4: "{{ guest_config.dns4 is defined }}"
+        dns4: "{{ guest_config.dns4 | default([]) }}"
+        add_routes4: "{{ guest_config.routes4 is defined }}"
+        _routes4: |
+          [
+            {% for route in (guest_config.routes4 | default([])) %}
+            {% set metric = route.metric | default(guest_config.route_metric4 if guest_config.route_metric4 is defined else '') %}
+            {# 0.0.0.0/0 is special case #}
+            {# https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/7/html/networking_guide/configuring-policy-based-routing-to-define-alternative-routes #}
+            {% if (route.to | string | trim) == '0.0.0.0/0' %}
+            {{ ('0.0.0.0/1 ' ~ route.via ~ ' ' ~ metric) | trim | to_json }},
+            {{ ('128.0.0.0/1 ' ~ route.via ~ ' ' ~ metric) | trim | to_json }}
+            {% else %}
+            {{ (route.to ~ ' ' ~ route.via ~ ' ' ~ metric) | trim | to_json }}
+            {% endif %}
+            {%-  if not loop.last %}
+            ,
+            {%   endif %}
+            {% endfor %}
+          ]
+        routes4: "{{ (_routes4 | from_json) if _routes4 is string else _routes4 }}"
+        create_nmcli_connection: "{{ nmcli_dev_dict[network_interface.device].connection is not defined }}"
+        nmcli_connection: "{{ nmcli_dev_dict[network_interface.device].connection | default(network_interface.device) }}"
+      when: item.key in network_interfaces_by_macaddress
+      loop: "{{ _guest_config_by_macaddress | dict2items }}"
+
+    - name: nmcli | Get active connections
+      command: "{{ nmcli_path | quote }} -f DEVICE,TYPE,STATE,NAME,UUID -t -m tabular con show --active"
+      register: nmcli_active_conn_result
+
+    - name: Debug | Print nmcli_active_conn_result
+      debug:
+        var: nmcli_active_conn_result
+
+    - name: nmcli | Decode nmcli_active_conn_result
+      set_fact:
+        nmcli_active_conn_list: "{{ value }}"
+      vars:
+        value: |
+          [
+            {% for line in nmcli_active_conn_result.stdout_lines %}
+            {%   set dev = line.split(':') %}
+            {{
+                {
+                  'device': dev[0]|default(''),
+                  'type': dev[1]|default(''),
+                  'state': dev[2]|default(''),
+                  'name': dev[3]|default(''),
+                  'uuid': dev[4]|default('')
+                } | to_json
+            }}
+            {%-  if not loop.last %}
+            ,
+            {%   endif %}
+            {% endfor %}
+          ]
+
+    - name: Debug | Print nmcli_active_conn_list
+      debug:
+        var: nmcli_active_conn_list
+
+    - name: nmcli | Fix network interfaces
+      include_tasks: "nmcli-fix-interface.yml"
+      vars:
+        fix_interface: "{{ network_interfaces_by_macaddress[(macaddress|lower)] }}"
+      loop: "{{ _fix_interfaces_with_macaddresses }}"
+      loop_control:
+        loop_var: macaddress
+      when: (macaddress|lower) in network_interfaces_by_macaddress
+
+    #- name: Restart service NetworkManager
+    #  become: yes
+    #  service:
+    #    name: NetworkManager
+    #    state: restarted

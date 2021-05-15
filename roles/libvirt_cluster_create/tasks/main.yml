@@ -1,0 +1,305 @@
+---
+#- name: Show libvirt_cluster
+#  debug:
+#    var: libvirt_cluster
+
+- name: Set libvirt_cluster variables
+  set_fact:
+    libvirt_cluster_config_file: "{{ (libvirt_cluster | default({})).config_file | default(omit) }}"
+    libvirt_cluster_inventory_file: "{{ (libvirt_cluster | default({})).inventory_file | default(omit) }}"
+    libvirt_cluster_inventory_group: "{{ (libvirt_cluster | default({})).inventory_group | default(omit) }}"
+    libvirt_cluster_inventory_group_vars: "{{ (libvirt_cluster | default({})).inventory_group_vars | default(omit) }}"
+    libvirt_cluster_inventory_replace_vars: "{{ (libvirt_cluster | default({})).inventory_replace_vars | default(omit) }}"
+  tags:
+    - write_config_file
+    - write_inventory_file
+    - generate_inventory
+
+- name: Set libvirt_config variable
+  set_fact:
+    libvirt_config: "{{ lookup('template', 'cluster.yml.j2') | from_yaml }}"
+  tags:
+    - write_config_file
+    - write_inventory_file
+    - generate_inventory
+
+- name: Set libvirt_vms and libvirt_host_networks
+  set_fact:
+    libvirt_vms: "{{ libvirt_config.libvirt_vms }}"
+    libvirt_host_networks: "{{ libvirt_config.libvirt_host_networks }}"
+  tags:
+    - write_config_file
+    - write_inventory_file
+    - generate_inventory
+
+- name: Debug | Test1
+  debug:
+    msg: "libvirt_cluster_config_file is defined: {{ libvirt_cluster_config_file is defined }}"
+
+- name: Debug | Show libvirt_vms
+  debug:
+    var: libvirt_vms
+
+- name: Debug | Show libvirt_host_networks
+  debug:
+    var: libvirt_host_networks
+
+- name: Debug | Print IP/Name
+  debug:
+    msg: "{{ item.1.ip }} {{ item.1.name }}"
+  loop: "{{ libvirt_config.libvirt_host_networks | subelements('ip.dhcp.hosts', skip_missing=True) }}"
+  when: item.1.ip is defined and item.1.name is defined
+
+#- name: Debug | Test2
+#  debug:
+#    msg: "Process: {{ lookup('template', 'cluster.yml.j2')  }}"
+
+#- name: Debug | Test3
+#  local_action:
+#    module: copy
+#    content: "{{ lookup('template', 'cluster.yml.j2') }}"
+#    dest: "./libvirt-cluster-template-output.yml"
+
+- name: Check libvirt_cluster_config_file
+  fail:
+    msg: "WARNING: libvirt_cluster.config_file is not defined !"
+  ignore_errors: yes
+  when:
+    - "'write_config_file' in ansible_run_tags"
+    - (libvirt_cluster_config_file is not defined or not libvirt_cluster_config_file)
+  tags:
+    - write_config_file
+
+- name: Save generated configuration
+  block:
+    - name: Print info about generated configuration
+      debug:
+        msg: "Write configuration to file {{ libvirt_cluster_config_file }}"
+
+    - name: Write configuration to file
+      local_action:
+        module: copy
+        content: "{{ libvirt_config | to_nice_yaml(indent=2, width=50, explicit_start=True, explicit_end=True) }}"
+        dest: "{{ libvirt_cluster_config_file }}"
+
+  when: libvirt_cluster_config_file is defined and libvirt_cluster_config_file
+  tags:
+    - write_config_file
+
+- name: Init ansible configuration for VMs
+  set_fact:
+    libvirt_cluster_vars: {}
+  tags:
+    - write_inventory_file
+    - generate_inventory
+
+- name: Check variables
+  fail:
+    msg: "Variable libvirt_config.libvirt_host_networks is not defined or is not an array"
+  when: libvirt_config.libvirt_host_networks is not defined or not (libvirt_config.libvirt_host_networks | length >= 0)
+  tags:
+    - write_inventory_file
+    - generate_inventory
+
+- name: Set ansible configuration for VMs
+  set_fact:
+    libvirt_cluster_vars: >-
+      {{
+          libvirt_cluster_vars if item.1.name in libvirt_cluster_vars else
+          (libvirt_cluster_vars | combine({
+            item.1.name: (item.1.vars | default({}) | combine({
+                'ansible_host': item.1.ip,
+                'ansible_user': item.1.vars.ansible_user | default(libvirt_cluster.ansible_user | default(omit)),
+                'ansible_port': item.1.vars.ansible_port | default(libvirt_cluster.ansible_port | default(22)),
+                'ansible_ssh_pass': item.1.vars.ansible_ssh_pass | default(libvirt_cluster.ansible_ssh_pass | default(omit)),
+                'ansible_become_pass': item.1.vars.ansible_become_pass | default(libvirt_cluster.ansible_become_pass | default(omit)),
+                'ansible_ssh_private_key_file': item.1.vars.ansible_ssh_private_key_file | default(libvirt_cluster.ansible_ssh_private_key_file | default(omit)),
+                'ansible_ssh_common_args': item.1.vars.ansible_ssh_common_args | default(libvirt_cluster.ansible_ssh_common_args | default(omit)),
+                'ansible_python_interpreter': item.1.vars.ansible_python_interpreter | default(libvirt_cluster.ansible_python_interpreter | default(omit))
+            }))
+         }))
+      }}
+  loop: "{{ libvirt_config.libvirt_host_networks | subelements('ip.dhcp.hosts', skip_missing=True) }}"
+  when: item.1.ip is defined and item.1.name is defined
+  tags:
+    - write_inventory_file
+    - generate_inventory
+
+#- name: Debug | Print libvirt_cluster_vars
+#  debug:
+#    var: libvirt_cluster_vars
+#  tags:
+#    - write_inventory_file
+#    - generate_inventory
+
+
+- name: Save generated inventory
+  block:
+
+    - name: Print info about generated inventory
+      debug:
+        msg: "Write inventory to file {{ libvirt_cluster_inventory_file }}"
+
+    - name: Init vars
+      set_fact:
+        libvirt_inventory_hosts: {}
+        libvirt_inventory: >-
+          {{
+            {
+               "all": {
+                 "hosts": {},
+                 "children": {
+                   libvirt_cluster_inventory_group: {
+                     "vars": group_vars,
+                     "hosts": {}
+                   }
+                 }
+               }
+             } if (libvirt_cluster_inventory_group is defined and libvirt_cluster_inventory_group|length) else {
+               "all": {
+                  "vars": group_vars,
+                  "hosts": {}
+                }
+             }
+          }}
+      vars:
+        _group_vars:
+          libvirt_host: "{{ inventory_hostname }}"
+          libvirt_config: "{{ libvirt_config }}"
+        group_vars: "{{ _group_vars | combine(libvirt_cluster_inventory_group_vars|default({})) }}"
+
+    - name: Set libvirt_inventory_hosts
+      no_log: true # Don't log passwords
+      set_fact:
+        libvirt_inventory_hosts: >-
+          {{ libvirt_inventory_hosts | combine({item.key : item.value}) }}
+      loop: "{{ libvirt_cluster_vars | dict2items }}"
+
+    - name: Debug | Print libvirt_cluster_inventory_replace_vars
+      debug:
+        var: libvirt_cluster_inventory_replace_vars
+
+    - assert:
+        that:
+          - libvirt_cluster_inventory_replace_vars is mapping
+        fail_msg: "libvirt_cluster_inventory_replace_vars variable must be a mapping, but is of type {{ (libvirt_cluster_inventory_replace_vars | type_debug) }}"
+      when: libvirt_cluster_inventory_replace_vars is defined
+
+    - name: Set libvirt_inventory variable
+      no_log: true # Don't log passwords
+      set_fact:
+        libvirt_inventory: >-
+          {{ libvirt_inventory | combine({
+               "all": {
+                 "hosts": {},
+                 "children": {
+                   libvirt_cluster_inventory_group: {
+                     "hosts": {item.key : host_vars}
+                   }
+                 }
+               }
+             } if (libvirt_cluster_inventory_group is defined and libvirt_cluster_inventory_group|length) else {
+               "all": {
+                  "hosts": {item.key : host_vars}
+                }
+             }, recursive=True)
+          }}
+      vars:
+        host_vars: >-
+          {{ (item.value | combine(libvirt_cluster_inventory_replace_vars, recursive=True))
+              if libvirt_cluster_inventory_replace_vars is defined else
+              item.vaule
+          }}
+      loop: "{{ libvirt_cluster_vars | dict2items }}"
+
+    - name: Write inventory to file
+      local_action:
+        module: copy
+        content: "{{ libvirt_inventory | to_nice_yaml(indent=2, width=50, explicit_start=True, explicit_end=True) }}"
+        dest: "{{ libvirt_cluster_inventory_file }}"
+
+    - name: Print inventory location
+      debug:
+        msg: "Inventory was written to file {{ libvirt_cluster_inventory_file }}"
+
+  when: libvirt_cluster_inventory_file is defined and libvirt_cluster_inventory_file
+  tags:
+    - write_inventory_file
+
+- name: Set libvirt cluster inventory groups
+  set_fact:
+    libvirt_host_groups: >-
+      {{
+        ['libvirt_cluster_hosts'] +
+          ([libvirt_cluster_inventory_group]
+            if (libvirt_cluster_inventory_group is defined and (libvirt_cluster_inventory_group|length>0)) else
+           [])
+      }}
+  tags:
+    - generate_inventory
+
+- name: Create libvirt cluster in-memory inventory
+  no_log: true # Don't log passwords
+  add_host:
+    name: "{{ item.key }}"
+    groups: "{{ libvirt_host_groups }}"
+    libvirt_config: "{{ libvirt_config }}"
+    ansible_user: "{{ item.value.ansible_user | default(omit) }}"
+    ansible_host: "{{ item.value.ansible_host | default(omit) }}"
+    ansible_port: "{{ item.value.ansible_port | default(omit) }}"
+    ansible_ssh_pass: "{{ item.value.ansible_ssh_pass | default(omit) }}"
+    ansible_become_pass: "{{ item.value.ansible_become_pass | default(omit) }}"
+    ansible_ssh_private_key_file: "{{ item.value.ansible_ssh_private_key_file | default(omit) }}"
+    ansible_ssh_common_args: "{{ item.value.ansible_ssh_common_args | default(omit) }}"
+    ansible_python_interpreter: "{{ item.value.ansible_python_interpreter | default(omit) }}"
+  loop: "{{ libvirt_cluster_vars | dict2items }}"
+  tags:
+    - generate_inventory
+
+- name: Set custom libvirt cluster variables per host in in-memory inventory
+  no_log: true # Don't log passwords
+  set_fact: "{{ item.value }}"
+  delegate_facts: true
+  delegate_to: "{{ item.key }}"
+  loop: "{{ libvirt_cluster_vars | dict2items }}"
+  tags:
+    - generate_inventory
+
+- name: Set custom libvirt cluster variables in in-memory inventory
+  no_log: true # Don't log passwords
+  set_fact: {"{{item[0].key}}": "{{ item[0].value }}"}
+  delegate_facts: true
+  delegate_to: "{{ item[1] }}"
+  loop: "{{ libvirt_cluster_inventory_group_vars|default({}) | dict2items | product(groups['libvirt_cluster_hosts']) | list }}"
+  tags:
+    - generate_inventory
+
+- name: Create VM Networks
+  include_role:
+    name: libvirt_host
+  vars:
+    libvirt_host_networks: "{{ libvirt_config.libvirt_host_networks }}"
+
+- name: Create VMs
+  include_role:
+    name: libvirt_vm
+  vars:
+    libvirt_vms: "{{ libvirt_config.libvirt_vms }}"
+
+- name: Print hosts to wait for
+  debug:
+    msg: "Wait for SSH access to {{ hostvars[item].ansible_host  }}:{{ hostvars[item].ansible_port }} with user {{ hostvars[item].ansible_user }}"
+  loop: "{{ groups['libvirt_cluster_hosts'] }}"
+
+- name: Wait for SSH banners
+  wait_for:
+    port: "{{ hostvars[item].ansible_port }}"
+    host: "{{ hostvars[item].ansible_host }}"
+    search_regex: OpenSSH
+    delay: 5
+  loop: "{{ groups['libvirt_cluster_hosts'] }}"
+
+#- name: STOP_HERE
+#  fail:
+#    msg: "STOPPED"
+#  when:  True

@@ -1,0 +1,50 @@
+---
+- name: Create libvirt snapshot
+  hosts: "{{ libvirt_host | default('libvirt') }}"
+  vars_prompt:
+    - name: libvirt_domains
+      prompt: "Libvirt domain(s) (separate by ' ' or ',')"
+      private: no
+
+  vars:
+    libvirt_vm_uri: "qemu:///system"
+
+    # Variables to add to the enviroment that is used to execute virsh commands
+    libvirt_vm_script_env: "{{  { 'LIBVIRT_DEFAULT_URI': libvirt_vm_uri } if libvirt_vm_uri else {} }}"
+
+  tasks:
+    - set_fact:
+        libvirt_domain_list: "{{ (libvirt_domains | default('')).strip().replace(' ',',').split(',') | list }}"
+
+    - name: Set timestamp
+      set_fact:
+        ts: "{{ lookup('pipe','date +%Y%m%d-%H%M%S') }}"
+        date: "{{ lookup('pipe','date') }}"
+
+    - name: Set snapshot name
+      set_fact:
+        snapshot_name: "{{ snapshot_name if snapshot_name is defined and snapshot_name else ts }}"
+
+    - name: Set description
+      set_fact:
+        description: "Snapshot {{snapshot_name}} at {{date}}"
+
+    - name: Create snapshot
+      environment: "{{ libvirt_vm_script_env }}"
+      command: >
+        virsh snapshot-create-as
+        --domain {{ item | quote }}
+        --name  {{ snapshot_name | quote }}
+        --description {{ description | quote }}
+      loop: "{{ libvirt_domain_list }}"
+      register: create_snapshot_r
+
+    - set_fact:
+        created_snapshots: {}
+
+    - set_fact:
+        created_snapshots: "{{ created_snapshots | combine({item.item: item.stdout_lines}) }}"
+      loop: "{{ create_snapshot_r.results }}"
+
+    - debug:
+        var: created_snapshots

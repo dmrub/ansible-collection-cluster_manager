@@ -1,0 +1,71 @@
+---
+- name: Revert libvirt snapshot
+  hosts: "{{ libvirt_host | default('libvirt') }}"
+  vars_prompt:
+    - name: snapshot_name
+      prompt: "Snapshot name"
+      private: no
+
+    - name: libvirt_domains
+      prompt: "Libvirt domain(s) (separate by ' ' or ',')"
+      private: no
+
+  vars:
+    libvirt_vm_uri: "qemu:///system"
+
+    # Variables to add to the enviroment that is used to execute virsh commands
+    libvirt_vm_script_env: "{{  { 'LIBVIRT_DEFAULT_URI': libvirt_vm_uri } if libvirt_vm_uri else {} }}"
+
+  tasks:
+    - set_fact:
+        libvirt_domain_list: "{{ (libvirt_domains | default('')).strip().replace(' ',',').split(',') | list }}"
+
+    - name: Get domain state
+      environment: "{{ libvirt_vm_script_env }}"
+      command: >
+        virsh domstate {{ item | quote }}
+      loop: "{{ libvirt_domain_list }}"
+      register: domstate_r
+
+    - name: Shutdown domain if required
+      environment: "{{ libvirt_vm_script_env }}"
+      command: >
+        virsh shutdown --domain {{ item.item | quote }}
+      loop: "{{ domstate_r.results }}"
+      when: "'shut off' not in item.stdout"
+
+    - debug:
+        var: domstate_r
+
+    - name: Revert snapshot
+      environment: "{{ libvirt_vm_script_env }}"
+      command: >
+        virsh snapshot-revert
+        --domain {{ item | quote }}
+        --snapshotname  {{ snapshot_name | quote }}
+      loop: "{{ libvirt_domain_list }}"
+      register: revert_snapshot_r
+
+    - set_fact:
+        reverted_snapshots: {}
+
+    - set_fact:
+        reverted_snapshots: "{{ reverted_snapshots | combine({item.item: item.stdout_lines}) }}"
+      loop: "{{ revert_snapshot_r.results }}"
+
+    - debug:
+        var: reverted_snapshots
+
+    - name: Get domain state
+      environment: "{{ libvirt_vm_script_env }}"
+      command: >
+        virsh domstate {{ item | quote }}
+      loop: "{{ libvirt_domain_list }}"
+      register: domstate_r
+
+    - name: Start domain if required
+      environment: "{{ libvirt_vm_script_env }}"
+      command: >
+        virsh start --domain {{ item.item | quote }}
+      loop: "{{ domstate_r.results }}"
+      when: "'shut off' in item.stdout"
