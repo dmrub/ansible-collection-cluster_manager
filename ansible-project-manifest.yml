@@ -4,7 +4,7 @@ repos:
       branch: main
       dest: ext/cluster-manager
       add_roles_path:
-          - ext/roles
+          - roles
       copy:
           - proj_dest: ext/cluster-manager/playbooks
             repo_src: playbooks/
