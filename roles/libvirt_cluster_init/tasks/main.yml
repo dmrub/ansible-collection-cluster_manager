@@ -157,9 +157,17 @@
     ansible_python_interpreter: "{{ python_path_result.stdout | trim }}"
 
 - name: Set hostname
-  become: yes
-  hostname:
-    name: "{{ inventory_hostname }}"
+  block:
+    - name: Set hostname
+      become: yes
+      hostname:
+        name: "{{ inventory_hostname }}"
+  rescue:
+    - name: Set hostname with systemd strategy
+      become: yes
+      hostname:
+        name: "{{ inventory_hostname }}"
+        use: systemd
 
 - name: Gather information
   setup:
