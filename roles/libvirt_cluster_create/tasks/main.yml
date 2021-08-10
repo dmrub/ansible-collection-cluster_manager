@@ -208,7 +208,7 @@
         host_vars: >-
           {{ (item.value | combine(libvirt_cluster_inventory_replace_vars, recursive=True))
               if libvirt_cluster_inventory_replace_vars is defined else
-              item.vaule
+              item.value
           }}
       loop: "{{ libvirt_cluster_vars | dict2items }}"
 
