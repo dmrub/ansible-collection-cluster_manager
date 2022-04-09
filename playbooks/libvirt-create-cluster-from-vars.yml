@@ -1,0 +1,208 @@
+---
+#- name: Force evaluation of ansible_host
+#  hosts: all
+#  gather_facts: false
+#  tags:
+#    - always
+#  tasks:
+#    - name: Force evaluation of ansible_host
+#      set_fact:
+#        eval_ansible_host: "{{ ansible_host | default(omit) }}"
+#        eval_hypervisor_ansible_ssh_common_args: "{{ hypervisor_ansible_ssh_common_args | default(omit) }}"
+#
+#    - name: Save value back
+#      set_fact:
+#        ansible_host: "{{ eval_ansible_host | default(omit) }}"
+#        hypervisor_ansible_ssh_common_args: "{{ eval_hypervisor_ansible_ssh_common_args | default(omit) }}"
+
+- name: Process variables
+  hosts: 127.0.0.1
+  connection: local
+  gather_facts: false
+  tags:
+    - always
+  vars_prompt:
+    - name: cluster_config_file
+      prompt: "Cluster configuration file (cluster_config_file)"
+      private: no
+
+  tasks:
+    - name: Set defaults
+      set_fact:
+        _cluster_config_file: "{{ cluster_config_file }}"
+
+    - name: Pre-process configuration file if it is a Jinja template
+      when: cluster_config_file.endswith('.j2')
+      block:
+        - name: Split cluster_config_file
+          set_fact:
+            _cluster_config_file_noext: "{{ value[0] }}"
+            _cluster_config_file_ext: "{{ value[1] }}"
+          vars:
+            value: "{{ (cluster_config_file | splitext | first | splitext | list) }}"
+
+        - name: Check that the configuration file has either yaml or json extension
+          assert:
+            that:
+              - _cluster_config_file_ext in ['.yaml', '.yml', '.json']
+            fail_msg: "Cluster configuration file must have either yaml or json extension, not {{ _cluster_config_file_ext }}"
+
+        - name: Set processed config file name
+          set_fact:
+            _cluster_config_file_pp: "{{ value }}"
+            _cluster_config_file: "{{ value }}"
+          vars:
+            value: "{{ _cluster_config_file_noext }}.ansible_generated{{ _cluster_config_file_ext }}"
+
+        - name: Preprocess variables if required
+          delegate_to: localhost
+          run_once: true
+          template:
+            src: "{{ cluster_config_file }}"
+            dest: "{{ _cluster_config_file_pp }}"
+
+    - name: Include cluster configuration variables
+      include_vars:
+        file: "{{ _cluster_config_file }}"
+        name: cluster_config
+
+    #- name: Load cluster configuration variables with lookup
+    #  set_fact:
+    #    cluster_config_value: "{{ lookup('file', _cluster_config_file) | from_yaml }}"
+
+    #- debug:
+    #    var: "{{ cluster_config }}"
+
+    #- name: STOP
+    #  fail:
+    #    msg: STOP
+    #  when: true
+
+    - name: Set variables for all libvirt_cluster_hosts
+      # https://medium.com/opsops/pocking-into-others-hostvars-69475ff0a8cf
+      set_fact:
+        cluster_config: "{{ cluster_config }}"
+      delegate_facts: yes
+      delegate_to: "{{ item }}"
+      loop: "{{ [ cluster_config.cluster_host ] }}"
+
+- name: Run on hypervisor
+  hosts: "{{ hostvars['127.0.0.1'].cluster_config.cluster_host | default('!all') }}"
+  gather_facts: true
+  tasks:
+    - name: Set configuration variables
+      set_fact:
+        libvirt_vm_uri: "{{ cluster_config.libvirt_vm_uri }}"
+        vm_users: "{{ cluster_config.vm_users }}"
+        create_k8s_inventory: "{{ cluster_config.create_k8s_inventory }}"
+        create_zfs_storage: "{{ cluster_config.create_zfs_storage }}"
+        zfs_pool: "{{ cluster_config.zfs_pool }}"
+        zfs_storage_path: "{{ cluster_config.zfs_storage_path }}"
+        storage_host: "{{ cluster_config.storage_host }}"
+        libvirt_network_interfaces: "{{ cluster_config.libvirt_network_interfaces }}"
+        libvirt_networks: "{{ cluster_config.libvirt_networks }}"
+        libvirt_cluster: "{{ cluster_config.libvirt_cluster }}"
+      tags:
+        - always
+
+    #- set_fact:
+    #    libvirt_cluster: "{{ hostvars['127.0.0.1']['cluster_config']['libvirt_cluster'] }}"
+
+    - name: Install network hook
+      include_role:
+        name: libvirt_network_hook
+
+    - name: Create cluster
+      include_role:
+        name: libvirt_cluster_create
+      tags:
+        - write_config_file
+        - write_inventory_file
+
+    - name: Create k8s inventory
+      when: create_k8s_inventory | default(false)
+      delegate_to: 127.0.0.1
+      connection: local
+      run_once: true
+      tags:
+        - k8s_inventory
+      block:
+        - name: Set variables
+          set_fact:
+            k8s_inventory_group: "{{ libvirt_config.libvirt_cluster_inventory_group }}"
+
+        - name: Create inventory
+          include_role:
+            name: k8s_multi_cluster_dir
+
+    - name: Set variables for all libvirt_cluster_hosts
+      # https://medium.com/opsops/pocking-into-others-hostvars-69475ff0a8cf
+      set_fact:
+        vm_users: "{{ vm_users }}"
+      delegate_facts: yes
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['libvirt_cluster_hosts'] }}"
+
+- name: Initialize VMs
+  hosts: "{{ 'libvirt_cluster_hosts' if 'libvirt_cluster_hosts' in groups else '!all' }}"
+  become_method: sudo
+  gather_facts: false
+  vars:
+    fix_interfaces_with_label: "primary"
+  tasks:
+    - name: Initialize cluster
+      include_role:
+        name: libvirt_cluster_init
+
+- name: Create VM users
+  hosts: "{{ 'libvirt_cluster_hosts' if 'libvirt_cluster_hosts' in groups else '!all' }}"
+  become_method: sudo
+  gather_facts: false
+  tasks:
+    - name: Set mod_vm_users fact
+      no_log: True # Don't log passwords
+      set_fact:
+        mod_vm_users: |-
+          {{ (mod_vm_users | default([])) + [ item | combine({'group_list': group_list}) ] }}
+        all_groups: "{{ (all_groups | default([])) | union(group_list) }}"
+      vars:
+        group_list: |-
+          {{ (item.groups | default('')).split(',') +
+                (['wheel'] if ansible_os_family == 'RedHat' and (item.is_admin | default(false)) else []) +
+                (['sudo'] if ansible_os_family == 'Debian' and (item.is_admin | default(false)) else [])
+          }}
+      loop: "{{ vm_users }}"
+
+    - name: DEBUG
+      debug:
+        var: all_groups
+
+    - name: Ensure groups exists
+      become: true
+      group:
+        name: "{{ item }}"
+        state: present
+      loop: "{{ all_groups }}"
+
+    - name: Create user
+      no_log: True # Don't log passwords
+      become: true
+      user:
+        name: "{{ item.name }}"
+        password: "{{ (item.password | password_hash('sha512')) if item.password is defined and (item.password != '') else omit }}"
+        groups: "{{ item.group_list | join(',') }}"
+        state: present
+        append: yes
+        shell: /bin/bash
+        createhome: yes
+      loop: "{{ mod_vm_users }}"
+
+    - name: Set authorized key took from file
+      no_log: True # Don't log passwords
+      become: true
+      authorized_key:
+        user: "{{ item.name }}"
+        state: present
+        key: "{{ lookup('file', item.public_key_file) }}"
+      when: "item.public_key_file is defined and (item.public_key_file | trim != '')"
+      loop: "{{ mod_vm_users }}"
